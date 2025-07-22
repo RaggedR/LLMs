@@ -20,6 +20,8 @@ string. Similarly if you decode and then encode you don't get exactly the same t
 
 import unittest
 import tiktoken
+import os
+from torch.utils.data import Dataset, DataLoader
 
 class TikTokenizer:
     def __init__(self, encoding_name="gpt2", allowed_special={"<|endoftext|>"}):
@@ -62,41 +64,70 @@ class TestTikTokenizer(unittest.TestCase):
         self.assertEqual(actual_text, expected_text, "Text decoding mismatch")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 """
 Just some visualizations of what we want to do
 """
 
-with open("the-verdict.txt", "r", encoding="utf-8") as f:
-    raw_text = f.read()
 
-my_tokenizer = TikTokenizer()
+class TestTikTokenizerShift(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Load test data once for all tests"""
+        with open("the-verdict.txt", "r", encoding="utf-8") as f:
+            cls.raw_text = f.read()
+        cls.tokenizer = TikTokenizer()
+        cls.enc_text = cls.tokenizer.encode(cls.raw_text)
+        
+        # Expected values from your output
+        cls.expected_x = [40, 367, 2885, 1464]
+        cls.expected_y = [367, 2885, 1464, 1807]
+        cls.expected_pairs = [
+            ([40], 367),
+            ([40, 367], 2885),
+            ([40, 367, 2885], 1464),
+            ([40, 367, 2885, 1464], 1807)
+        ]
+        cls.expected_decoded_pairs = [
+            ("I", " H"),
+            ("I H", "AD"),
+            ("I HAD", " always"),
+            ("I HAD always", " thought")
+        ]
+    def test_context_windows(self):
+        """Test the x and y context windows"""
+        context_size = 4
+        x = self.enc_text[:context_size]
+        y = self.enc_text[1:context_size+1]
+        
+        self.assertEqual(x, self.expected_x, "Initial context window (x) mismatch")
+        self.assertEqual(y, self.expected_y, "Shifted context window (y) mismatch")
 
-enc_text = my_tokenizer.encode(raw_text)
-print(len(enc_text))
+    def test_token_prediction_pairs(self):
+        """Test the token prediction pairs"""
+        for i, (expected_context, expected_target) in enumerate(self.expected_pairs, 1):
+            #Note that self.enc_text[:1] is a list containing the first elements of
+            # the list self.enc_text.
+            context = self.enc_text[:i]
+            target = self.enc_text[i]
+            with self.subTest(i=i):
+                self.assertEqual(context, expected_context, f"Context at position {i} mismatch")
+                self.assertEqual(target, expected_target, f"Target at position {i} mismatch")
 
-context_size = 4
+    def test_decoded_prediction_pairs(self):
+        """Test the decoded prediction pairs"""
+        for i, (expected_context, expected_target) in enumerate(self.expected_decoded_pairs, 1):
+            #Note that self.enc_text[:1] is a list containing the first elements of
+            # the list self.enc_text.
+            context = self.enc_text[:i]
+            target = self.enc_text[i]
+            with self.subTest(i=i):
+                decoded_context = self.tokenizer.decode(context)
+                decoded_target = self.tokenizer.decode([target])
+                self.assertEqual(decoded_context, expected_context, f"Decoded context at position {i} mismatch")
+                self.assertEqual(decoded_target, expected_target, f"Decoded target at position {i} mismatch")
 
-x = enc_text[:context_size]
-y = enc_text[1:context_size+1]
-
-print(f"x: {x}")
-print(f"y:      {y}")
-
-for i in range(1, context_size+1):
-    context = enc_text[:i]
-    desired = enc_text[i]
-
-    print(context, "---->", desired)
-    
-for i in range(1, context_size+1):
-    context = enc_text[:i]
-    desired = enc_text[i]
-
-    print(my_tokenizer.decode(context), "---->", my_tokenizer.decode([desired]))
-
+if __name__ == "__main__":
+    unittest.main()
 
 
 """
@@ -117,7 +148,7 @@ The training sequences are stored as PyTorch tensors in self.input_ids and self.
      
 """
 
-from torch.utils.data import Dataset, DataLoader
+
 
 class GPTDatasetV1(Dataset):
     def __init__(self, txt, tokenizer, max_length, stride):
