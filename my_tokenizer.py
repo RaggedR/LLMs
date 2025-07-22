@@ -1,18 +1,6 @@
 import tiktoken
 import torch
 
-class TikTokenizer:
-    def __init__(self, encoding_name="gpt2"):
-        """Initialize tokenizer with specified encoding"""
-        self.encoding = tiktoken.get_encoding(encoding_name)
-    
-    def encode(self, text):
-        """Convert text to token IDs"""
-        return self.encoding.encode(text)
-    
-    def decode(self, tokens):
-        """Convert token IDs back to text"""
-        return self.encoding.decode(tokens)
 
 """
 
@@ -28,6 +16,57 @@ It repeats this until it gets whole words or even phrases as a single token.
 It is not necessarily true that if you encode and then decode you get exactly the same
 string. Similarly if you decode and then encode you don't get exactly the same tokens.
 
+"""
+
+import unittest
+import tiktoken
+
+class TikTokenizer:
+    def __init__(self, encoding_name="gpt2", allowed_special={"<|endoftext|>"}):
+        """Initialize tokenizer with specified encoding"""
+        self.encoding = tiktoken.get_encoding(encoding_name)
+    
+    def encode(self, text):
+        """Convert text to token IDs"""
+        return self.encoding.encode(text)
+    
+    def decode(self, tokens):
+        """Convert token IDs back to text"""
+        return self.encoding.decode(tokens)
+
+
+""" 
+This class inherits from the class unittest.TestCase.
+assertEqual is method inherited from unittest.TestCase
+All methods starting with test_ are run when we call unittest.main()
+Output: OK means all tests were passed.
+"""
+
+class TestTikTokenizer(unittest.TestCase):
+    def setUp(self):
+        """Set up test fixtures"""
+        self.tokenizer = TikTokenizer()
+    
+    def test_encode(self):
+        """Test encoding text to tokens"""
+        text = "Hello world!"
+        expected_tokens = [15496, 995, 0]  
+        actual_tokens = self.tokenizer.encode(text)
+        self.assertEqual(actual_tokens, expected_tokens, "Token encoding mismatch")
+    
+    def test_decode(self):
+        """Test decoding tokens back to text"""
+        tokens = [15496, 995, 0]  
+        expected_text = "Hello world!"
+        actual_text = self.tokenizer.decode(tokens)
+        self.assertEqual(actual_text, expected_text, "Text decoding mismatch")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+"""
+Just some visualizations of what we want to do
 """
 
 with open("the-verdict.txt", "r", encoding="utf-8") as f:
@@ -58,8 +97,27 @@ for i in range(1, context_size+1):
 
     print(my_tokenizer.decode(context), "---->", my_tokenizer.decode([desired]))
 
-from torch.utils.data import Dataset, DataLoader
 
+
+"""
+This code defines a custom PyTorch Dataset class called GPTDatasetV1 for preparing text data to train a GPT-style language model
+
+Dataset is used to define custom datasets.
+DataLoader can later be used to create iterable batches from the dataset.
+
+This class inherits from torch.utils.data.Dataset.
+It is designed to prepare input-target pairs for training a language model.
+
+It uses a sliding window approach to split the tokenized text into overlapping sequences.
+ 
+max_length: The maximum length of input sequences.
+stride: How many tokens to move the sliding window forward.
+
+The training sequences are stored as PyTorch tensors in self.input_ids and self.target_ids.   
+     
+"""
+
+from torch.utils.data import Dataset, DataLoader
 
 class GPTDatasetV1(Dataset):
     def __init__(self, txt, tokenizer, max_length, stride):
@@ -67,7 +125,7 @@ class GPTDatasetV1(Dataset):
         self.target_ids = []
 
         # Tokenize the entire text
-        token_ids = tokenizer.encode(txt, allowed_special={"<|endoftext|>"})
+        token_ids = tokenizer.encode(txt)
         assert len(token_ids) > max_length, "Number of tokenized inputs must at least be equal to max_length+1"
 
         # Use a sliding window to chunk the book into overlapping sequences of max_length
@@ -83,6 +141,24 @@ class GPTDatasetV1(Dataset):
     def __getitem__(self, idx):
         return self.input_ids[idx], self.target_ids[idx]
 
+"""
+Example useage
+"""
+
+
+txt = "Hello, world! This is a sample text for training GPT."
+tokenizer = TikTokenizer()
+max_length = 5
+stride = 2
+
+dataset = GPTDatasetV1(txt, tokenizer, max_length, stride)
+loader = DataLoader(dataset, batch_size=2, shuffle=False)
+
+for batch in loader:
+    inputs, targets = batch
+    print("Input:", inputs)
+    print("Target:", targets)
+
 
 """
 The stride is how far you "skip along" to start the next training pair.
@@ -91,6 +167,38 @@ EG: stride = 4 and max_length = 10 looks like
 [a b c d e f g h i j] ----> [b c d e f g h i j k]
 [f g h i j k l m n o] ----> [g h i j k l m n o p]
 etc...
+"""
+
+"""
+DataLoader Setup:
+
+    Wraps the dataset into an iterable loader.
+
+    Batches sequences (e.g., batch_size=4 → 4 sequences per batch).
+
+    Enables shuffling and parallel loading (num_workers).
+    
+drop_last=True ensures uniform batch sizes (critical for GPU training).
+
+num_workers specifies how many subprocesses to use for:
+
+    Loading data
+
+    Preprocessing (tokenization, augmentation, etc.)
+
+    Batching
+    
+Each worker:
+
+    Loads data independently
+
+    Applies transforms
+
+    Returns batches via shared memory
+    
+Start with 0 for debugging (fewer multiprocessing issues)
+
+Output is a PyTorch DataLoader, compatible with standard training loops:
 """
 
 def create_dataloader_v1(txt, max_length=256, 
@@ -114,7 +222,15 @@ def create_dataloader_v1(txt, max_length=256,
 
     return dataloader
 
+"""
+Example useage
+"""
 
+text = "The quick brown fox jumps over the lazy dog."
+dataloader = create_dataloader_v1(text, max_length=4, stride=1, batch_size=2)
+
+for batch in dataloader:
+    print(batch)  # Batched token IDs (shape: [batch_size, max_length])
 
 
 
