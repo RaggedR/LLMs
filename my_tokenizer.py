@@ -1,6 +1,8 @@
 import tiktoken
 import torch
-
+import unittest
+import os
+from torch.utils.data import Dataset, DataLoader
 
 """
 
@@ -10,7 +12,7 @@ with a vocabulary of 50,257 tokens.
 This is a proprietry dataset owned by OpenAI.
 
 BPE begins with individual characters as the tokens, it then scans through the training
-set and findz the most common pairs of characters. And turns these into new tokens.
+set and finds the most common pairs of characters. And turns these into new tokens.
 It repeats this until it gets whole words or even phrases as a single token.
 
 It is not necessarily true that if you encode and then decode you get exactly the same
@@ -18,10 +20,9 @@ string. Similarly if you decode and then encode you don't get exactly the same t
 
 """
 
-import unittest
-import tiktoken
-import os
-from torch.utils.data import Dataset, DataLoader
+
+
+
 
 class TikTokenizer:
     def __init__(self, encoding_name="gpt2", allowed_special={"<|endoftext|>"}):
@@ -38,7 +39,7 @@ class TikTokenizer:
 
 
 """ 
-This class inherits from the class unittest.TestCase.
+The class below inherits from the class unittest.TestCase.
 assertEqual is method inherited from unittest.TestCase
 All methods starting with test_ are run when we call unittest.main()
 Output: OK means all tests were passed.
@@ -65,7 +66,8 @@ class TestTikTokenizer(unittest.TestCase):
 
 
 """
-Just some visualizations of what we want to do
+The training data is a sequence of words from some text, and the label is the next word in the 
+sequence. The context_size is the length of the original sequences. Here we have "stride" = 1.
 """
 
 
@@ -106,28 +108,33 @@ class TestTikTokenizerShift(unittest.TestCase):
         """Test the token prediction pairs"""
         for i, (expected_context, expected_target) in enumerate(self.expected_pairs, 1):
             #Note that self.enc_text[:1] is a list containing the first elements of
-            # the list self.enc_text.
-            context = self.enc_text[:i]
-            target = self.enc_text[i]
+            # the list self.enc_text. In python lists normally begin at 0.
+            context = self.enc_text[:i] # First i elements
+            target = self.enc_text[i] # (i+1)th element (label)
             with self.subTest(i=i):
                 self.assertEqual(context, expected_context, f"Context at position {i} mismatch")
                 self.assertEqual(target, expected_target, f"Target at position {i} mismatch")
+                """ These are the ith values of context, target, expected_context and
+                    expected_target respectively. 
+                    With `subTest`, even if one subtest fails, the loop continues to run the 
+                    next subtests. At the end of the test method, all the subtests that failed 
+                    will be reported individually. """
+
+    """ This test does the same as the previous one, however dealing with decoded tokens rather than
+the tokesn themselves """
 
     def test_decoded_prediction_pairs(self):
         """Test the decoded prediction pairs"""
-        for i, (expected_context, expected_target) in enumerate(self.expected_decoded_pairs, 1):
+        for i, (decoded_expected_context, decoded_expected_target) in enumerate(self.expected_decoded_pairs, 1):
             #Note that self.enc_text[:1] is a list containing the first elements of
             # the list self.enc_text.
-            context = self.enc_text[:i]
-            target = self.enc_text[i]
+            context = self.enc_text[:i] # first i elements
+            target = self.enc_text[i] # (i+1)th element (label_
             with self.subTest(i=i):
                 decoded_context = self.tokenizer.decode(context)
                 decoded_target = self.tokenizer.decode([target])
-                self.assertEqual(decoded_context, expected_context, f"Decoded context at position {i} mismatch")
-                self.assertEqual(decoded_target, expected_target, f"Decoded target at position {i} mismatch")
-
-if __name__ == "__main__":
-    unittest.main()
+                self.assertEqual(decoded_context, decoded_expected_context, f"Decoded context at position {i} mismatch")
+                self.assertEqual(decoded_target, decoded_expected_target, f"Decoded target at position {i} mismatch")
 
 
 """
@@ -173,10 +180,80 @@ class GPTDatasetV1(Dataset):
         return self.input_ids[idx], self.target_ids[idx]
 
 """
+The stride is how far you "skip along" to start the next training pair.
+The max_length is the length of each input to the training pair.
+EG: stride = 4 and max_length = 10 looks like
+[a b c d e f g h i j] ----> [b c d e f g h i j k]
+[f g h i j k l m n o] ----> [g h i j k l m n o p]
+etc...
+"""
+
+class TestGPTDatasetV1(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Setup shared test fixtures"""
+        cls.txt = "Hello, world! This is a sample text for training GPT."
+        cls.tokenizer = TikTokenizer()
+        cls.max_length = 5
+        cls.stride = 2
+        
+        # Expected tokenized output (verify with your tokenizer)
+        cls.expected_tokens = cls.tokenizer.encode(cls.txt)
+        
+    def test_sample_content(self):
+        """Test the content of individual samples"""
+        dataset = GPTDatasetV1(self.txt, self.tokenizer, self.max_length, self.stride)
+        
+        # Test first sample
+        input1, target1 = dataset[0]
+        self.assertEqual(len(input1), self.max_length)
+        self.assertEqual(len(target1), self.max_length)
+        self.assertTrue(torch.equal(target1[:-1], input1[1:]))  # Targets should be inputs shifted by 1
+        #target1[:-1] refers to all elements of the target1 except the last one. 
+        #We testing the fundamental autoregressive property of the dataset (predicting the next token), not the stride-based sampling.
+        
+        # Test second sample
+        input2, target2 = dataset[1]
+        self.assertEqual(len(input2), self.max_length)
+        self.assertEqual(len(target2), self.max_length)
+        #Verifies the sliding window is working correctly
+        self.assertEqual(input2[0], self.expected_tokens[self.stride])
+
+    def test_dataloader_batching(self):
+        """Test the dataset works with DataLoader"""
+        dataset = GPTDatasetV1(self.txt, self.tokenizer, self.max_length, self.stride)
+        loader = DataLoader(dataset, batch_size=2, shuffle=False)
+        
+        batches = list(loader)
+        self.assertGreater(len(batches), 0)
+        
+        # Verify first batch
+        inputs, targets = batches[0]
+        self.assertEqual(inputs.shape, (2, self.max_length))
+        self.assertEqual(targets.shape, (2, self.max_length))
+        
+        # Verify shift between input and target
+        self.assertTrue(torch.equal(targets[:, :-1], inputs[:, 1:]))
+
+    def test_stride_effect(self):
+        """Test different stride values produce correct samples"""
+        for stride in [1, 2, 3]:
+            with self.subTest(stride=stride):
+                dataset = GPTDatasetV1(self.txt, self.tokenizer, self.max_length, stride)
+                input1, target1 = dataset[0]
+                if stride > 1:
+                    input2, target2 = dataset[1]
+                    self.assertEqual(input2[0], input1[stride])
+
+if __name__ == "__main__":
+    unittest.main()
+    
+
+"""
 Example useage
 """
 
-
+"""
 txt = "Hello, world! This is a sample text for training GPT."
 tokenizer = TikTokenizer()
 max_length = 5
@@ -189,16 +266,9 @@ for batch in loader:
     inputs, targets = batch
     print("Input:", inputs)
     print("Target:", targets)
+"""
 
 
-"""
-The stride is how far you "skip along" to start the next training pair.
-The max_length is the length of each input to the training pair.
-EG: stride = 4 and max_length = 10 looks like
-[a b c d e f g h i j] ----> [b c d e f g h i j k]
-[f g h i j k l m n o] ----> [g h i j k l m n o p]
-etc...
-"""
 
 """
 DataLoader Setup:
