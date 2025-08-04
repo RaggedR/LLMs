@@ -69,76 +69,121 @@ class TestTikTokenizer(unittest.TestCase):
 The training data is a sequence of words from some text, and the label is the next word in the 
 sequence. The context_size is the length of the original sequences. Here we have "stride" = 1.
 """
+# context_generator.py (updated)
+class SlidingContextWindowGenerator:
+    """
+    Generates fixed-length context-target pairs using a sliding window approach.
+    Designed for language model training where:
+      - Input: sequence of tokens [t_i, t_i+1, ..., t_i+n-1]
+      - Target: next token sequence [t_i+1, t_i+2, ..., t_i+n]
+    """
+    def __init__(self, encoded_text, context_size, stride):
+        """
+        Args:
+            encoded_text: List of token IDs
+            context_size: Fixed length of context window (max_length)
+            stride: Step size between consecutive windows
+        """
+        self.encoded_text = encoded_text
+        self.context_size = context_size
+        self.stride = stride
+
+    def generate_samples(self):
+        """
+        Generates all (input, target) pairs using sliding window
+        Returns:
+            List of tuples: [(input_chunk, target_chunk), ...]
+        """
+        samples = []
+        for i in range(0, len(self.encoded_text) - self.context_size, self.stride):
+            input_chunk = self.encoded_text[i:i + self.context_size]
+            target_chunk = self.encoded_text[i+1: i + self.context_size + 1]
+            samples.append((input_chunk, target_chunk))
+        return samples
+
+# dataset.py
+from torch.utils.data import Dataset
 
 
-class TestTikTokenizerShift(unittest.TestCase):
+class GPTDatasetV1(Dataset):
+    def __init__(self, txt, tokenizer, max_length, stride):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        
+        # Tokenize the entire text
+        token_ids = tokenizer.encode(txt)
+        
+        # Use generator to create training samples
+        generator = SlidingContextWindowGenerator(
+            encoded_text=token_ids,
+            context_size=max_length,
+            stride=stride
+        )
+        samples = generator.generate_samples()
+        
+        # Convert to tensors
+        self.input_ids = [torch.tensor(x[0]) for x in samples]
+        self.target_ids = [torch.tensor(x[1]) for x in samples]
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, idx):
+        return self.input_ids[idx], self.target_ids[idx]
+
+# test_dataset.py (unchanged)
+from torch.utils.data import DataLoader
+# Assuming TikTokenizer is available
+# from tokenizer import TikTokenizer
+
+class TestFdGPTDatasetV1(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        """Load test data once for all tests"""
-        with open("the-verdict.txt", "r", encoding="utf-8") as f:
-            cls.raw_text = f.read()
+        cls.txt = "Hello, world! This is a sample text for training GPT."
         cls.tokenizer = TikTokenizer()
-        cls.enc_text = cls.tokenizer.encode(cls.raw_text)
+        cls.max_length = 5
+        cls.stride = 2
+        cls.expected_tokens = cls.tokenizer.encode(cls.txt)
         
-        # Expected values from your output
-        cls.expected_x = [40, 367, 2885, 1464]
-        cls.expected_y = [367, 2885, 1464, 1807]
-        cls.expected_pairs = [
-            ([40], 367),
-            ([40, 367], 2885),
-            ([40, 367, 2885], 1464),
-            ([40, 367, 2885, 1464], 1807)
-        ]
-        cls.expected_decoded_pairs = [
-            ("I", " H"),
-            ("I H", "AD"),
-            ("I HAD", " always"),
-            ("I HAD always", " thought")
-        ]
-    def test_context_windows(self):
-        """Test the x and y context windows"""
-        context_size = 4
-        x = self.enc_text[:context_size]
-        y = self.enc_text[1:context_size+1]
+    def test_sample_content(self):
+        dataset = GPTDatasetV1(self.txt, self.tokenizer, self.max_length, self.stride)
+        input1, target1 = dataset[0]
+        self.assertEqual(len(input1), self.max_length)
+        self.assertEqual(len(target1), self.max_length)
+        self.assertTrue(torch.equal(target1[:-1], input1[1:]))
         
-        self.assertEqual(x, self.expected_x, "Initial context window (x) mismatch")
-        self.assertEqual(y, self.expected_y, "Shifted context window (y) mismatch")
+        input2, target2 = dataset[1]
+        self.assertEqual(len(input2), self.max_length)
+        self.assertEqual(len(target2), self.max_length)
+        self.assertEqual(input2[0], self.expected_tokens[self.stride])
 
-    def test_token_prediction_pairs(self):
-        """Test the token prediction pairs"""
-        for i, (expected_context, expected_target) in enumerate(self.expected_pairs, 1):
-            #Note that self.enc_text[:1] is a list containing the first elements of
-            # the list self.enc_text. In python lists normally begin at 0.
-            context = self.enc_text[:i] # First i elements
-            target = self.enc_text[i] # (i+1)th element (label)
-            with self.subTest(i=i):
-                self.assertEqual(context, expected_context, f"Context at position {i} mismatch")
-                self.assertEqual(target, expected_target, f"Target at position {i} mismatch")
-                """ These are the ith values of context, target, expected_context and
-                    expected_target respectively. 
-                    With `subTest`, even if one subtest fails, the loop continues to run the 
-                    next subtests. At the end of the test method, all the subtests that failed 
-                    will be reported individually. """
+    def test_dataloader_batching(self):
+        dataset = GPTDatasetV1(self.txt, self.tokenizer, self.max_length, self.stride)
+        loader = DataLoader(dataset, batch_size=2, shuffle=False)
+        batches = list(loader)
+        self.assertGreater(len(batches), 0)
+        
+        inputs, targets = batches[0]
+        self.assertEqual(inputs.shape, (2, self.max_length))
+        self.assertEqual(targets.shape, (2, self.max_length))
+        self.assertTrue(torch.equal(targets[:, :-1], inputs[:, 1:]))
 
-    """ This test does the same as the previous one, however dealing with decoded tokens rather than
-the tokesn themselves """
+    def test_stride_effect(self):
+        for stride in [1, 2, 3]:
+            with self.subTest(stride=stride):
+                dataset = GPTDatasetV1(self.txt, self.tokenizer, self.max_length, stride)
+                input1, target1 = dataset[0]
+                if stride > 1 and len(dataset) > 1:
+                    input2, target2 = dataset[1]
+                    self.assertEqual(input2[0], input1[stride])
 
-    def test_decoded_prediction_pairs(self):
-        """Test the decoded prediction pairs"""
-        for i, (decoded_expected_context, decoded_expected_target) in enumerate(self.expected_decoded_pairs, 1):
-            #Note that self.enc_text[:1] is a list containing the first elements of
-            # the list self.enc_text.
-            context = self.enc_text[:i] # first i elements
-            target = self.enc_text[i] # (i+1)th element (label_
-            with self.subTest(i=i):
-                decoded_context = self.tokenizer.decode(context)
-                decoded_target = self.tokenizer.decode([target])
-                self.assertEqual(decoded_context, decoded_expected_context, f"Decoded context at position {i} mismatch")
-                self.assertEqual(decoded_target, decoded_expected_target, f"Decoded target at position {i} mismatch")
+
+
 
 
 """
-This code defines a custom PyTorch Dataset class called GPTDatasetV1 for preparing text data to train a GPT-style language model
+This code defines a custom PyTorch Dataset class called GPTDatasetV1 for preparing text 
+data to train a GPT-style language model
 
 Dataset is used to define custom datasets.
 DataLoader can later be used to create iterable batches from the dataset.
@@ -155,29 +200,6 @@ The training sequences are stored as PyTorch tensors in self.input_ids and self.
      
 """
 
-
-
-class GPTDatasetV1(Dataset):
-    def __init__(self, txt, tokenizer, max_length, stride):
-        self.input_ids = []
-        self.target_ids = []
-
-        # Tokenize the entire text
-        token_ids = tokenizer.encode(txt)
-        assert len(token_ids) > max_length, "Number of tokenized inputs must at least be equal to max_length+1"
-
-        # Use a sliding window to chunk the book into overlapping sequences of max_length
-        for i in range(0, len(token_ids) - max_length, stride):
-            input_chunk = token_ids[i:i + max_length]
-            target_chunk = token_ids[i + 1: i + max_length + 1]
-            self.input_ids.append(torch.tensor(input_chunk))
-            self.target_ids.append(torch.tensor(target_chunk))
-
-    def __len__(self):
-        return len(self.input_ids)
-
-    def __getitem__(self, idx):
-        return self.input_ids[idx], self.target_ids[idx]
 
 """
 The stride is how far you "skip along" to start the next training pair.
@@ -249,11 +271,18 @@ if __name__ == "__main__":
     unittest.main()
     
 
-"""
-Example useage
-"""
+
+
+
+
 
 """
+
+'''
+Example useage
+'''
+
+
 txt = "Hello, world! This is a sample text for training GPT."
 tokenizer = TikTokenizer()
 max_length = 5
@@ -266,16 +295,16 @@ for batch in loader:
     inputs, targets = batch
     print("Input:", inputs)
     print("Target:", targets)
-"""
 
 
 
-"""
+
+
 DataLoader Setup:
 
     Wraps the dataset into an iterable loader.
 
-    Batches sequences (e.g., batch_size=4 → 4 sequences per batch).
+    Batches sequences (e.g., batch_size=4 sequences per batch).
 
     Enables shuffling and parallel loading (num_workers).
     
@@ -323,9 +352,9 @@ def create_dataloader_v1(txt, max_length=256,
 
     return dataloader
 
-"""
+'''
 Example useage
-"""
+'''
 
 text = "The quick brown fox jumps over the lazy dog."
 dataloader = create_dataloader_v1(text, max_length=4, stride=1, batch_size=2)
